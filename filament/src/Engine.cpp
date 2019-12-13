@@ -46,10 +46,12 @@
 #include <utils/Panic.h>
 #include <utils/Systrace.h>
 
+#include <chrono>
 #include <memory>
 
 #include "generated/resources/materials.h"
 
+using namespace std::chrono_literals;
 using namespace filament::math;
 using namespace utils;
 
@@ -118,6 +120,9 @@ FEngine* FEngine::create(Backend backend, Platform* platform, void* sharedGLCont
         }
         instance->mDriver = platform->createDriver(sharedGLContext);
     } else {
+        uint32_t id = std::thread::hardware_concurrency() - 2;
+        JobSystem::setThreadAffinityById(id);
+
         // start the driver thread
         instance->mDriverThread = std::thread(&FEngine::loop, instance);
 
@@ -778,12 +783,37 @@ void* FEngine::streamAlloc(size_t size, size_t alignment) noexcept {
     return getDriverApi().allocate(size, alignment);
 }
 
+namespace {
+void busyLoop(int64_t iterations) {
+    SYSTRACE_CALL();
+    double dummy = 0.5;
+    for (int64_t i = 0; i < iterations; ++i) {
+        if (dummy < 2.0) {
+            dummy *= 3.0;
+        } else {
+            dummy /= 2.0;
+        }
+        if (dummy == 1.2345) {
+            slog.d << "You hit the lottery!";
+        }
+    }
+}
+}
+
 bool FEngine::execute() {
+    static auto lastExecuteEnd = std::chrono::steady_clock::now();
 
     // wait until we get command buffers to be executed (or thread exit requested)
     auto buffers = mCommandBufferQueue.waitForCommands();
     if (UTILS_UNLIKELY(buffers.empty())) {
         return false;
+    }
+
+    SYSTRACE_NAME("FEngine::execute");
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now - lastExecuteEnd > 2ms) {
+        busyLoop(800000);
     }
 
     // execute all command buffers
@@ -794,6 +824,7 @@ bool FEngine::execute() {
         }
     }
 
+    lastExecuteEnd = std::chrono::steady_clock::now();
     return true;
 }
 

@@ -18,7 +18,13 @@ package com.google.android.filament.textured
 
 import android.animation.ValueAnimator
 import android.app.Activity
+import android.content.Context
+import android.graphics.Color
 import android.os.Bundle
+import android.os.PowerManager
+import android.os.SystemClock
+import android.os.Trace
+import android.util.Log
 import android.view.Choreographer
 import android.view.Surface
 import android.view.SurfaceView
@@ -73,7 +79,10 @@ class MainActivity : Activity() {
     private lateinit var ibl: Ibl
 
     // Filament entity representing a renderable object
-    @Entity private var light = 0
+    @Entity
+    private var light = 0
+
+    private var spotLights: MutableList<Int> = mutableListOf()
 
     // A swap chain is Filament's representation of a surface
     private var swapChain: SwapChain? = null
@@ -97,12 +106,17 @@ class MainActivity : Activity() {
         setupScene()
     }
 
+    private fun setScaleFactor(scale: Float) {
+        uiHelper.setDesiredSize((1080 * scale).toInt(), (1840 * scale).toInt())
+
+    }
+
     private fun setupSurfaceView() {
         uiHelper = UiHelper(UiHelper.ContextErrorPolicy.DONT_CHECK)
         uiHelper.renderCallback = SurfaceCallback()
 
         // NOTE: To choose a specific rendering resolution, add the following line:
-        // uiHelper.setDesiredSize(1280, 720)
+        setScaleFactor(0.85f)
 
         uiHelper.attachTo(surfaceView)
     }
@@ -131,10 +145,25 @@ class MainActivity : Activity() {
         view.scene = scene
 
         // Enable dynamic resolution with a default target frame rate of 60fps
-        val options = View.DynamicResolutionOptions()
-        options.enabled = true
+        // val options = View.DynamicResolutionOptions()
+        // options.enabled = true
 
-        view.dynamicResolutionOptions = options
+        // view.dynamicResolutionOptions = options
+    }
+
+    private fun addOrbiter(materials: Map<String, MaterialInstance>, alpha: Float) {
+        val angle = (alpha * 2 * PI).toFloat()
+        val orbiterMesh = loadMesh(assets, "models/shader_ball.filamesh", materials, engine)
+        val orbiterScale = 1.0f
+        val orbitRadius = 50.0f
+        engine.transformManager.setTransform(engine.transformManager.getInstance(orbiterMesh.renderable),
+                floatArrayOf(
+                        orbiterScale, 0.0f, 0.0f, 0.0f,
+                        0.0f, orbiterScale, 0.0f, 0.0f,
+                        0.0f, 0.0f, orbiterScale, 0.0f,
+                        orbitRadius * sin(angle), -1.2f, orbitRadius * cos(angle), 1.0f
+                ))
+        scene.addEntity(orbiterMesh.renderable)
     }
 
     private fun setupScene() {
@@ -153,13 +182,18 @@ class MainActivity : Activity() {
         // Load the mesh in the filamesh format (see filamesh tool)
         mesh = loadMesh(assets, "models/shader_ball.filamesh", materials, engine)
 
+        val numOrbiting = 100
+        for (i in 0 until numOrbiting) {
+            addOrbiter(materials, i / numOrbiting.toFloat())
+        }
+
         // Move the mesh down
         // Filament uses column-major matrices
         engine.transformManager.setTransform(engine.transformManager.getInstance(mesh.renderable),
                 floatArrayOf(
-                        1.0f,  0.0f, 0.0f, 0.0f,
-                        0.0f,  1.0f, 0.0f, 0.0f,
-                        0.0f,  0.0f, 1.0f, 0.0f,
+                        1.0f, 0.0f, 0.0f, 0.0f,
+                        0.0f, 1.0f, 0.0f, 0.0f,
+                        0.0f, 0.0f, 1.0f, 0.0f,
                         0.0f, -1.2f, 0.0f, 1.0f
                 ))
 
@@ -177,11 +211,33 @@ class MainActivity : Activity() {
                 .intensity(110_000.0f)
                 // The direction is normalized on our behalf
                 .direction(-0.753f, -1.0f, 0.890f)
+                .castLight(true)
                 .castShadows(true)
                 .build(engine, light)
 
         // Add the entity to the scene to light it
         scene.addEntity(light)
+
+        // Add some spot lights to increase CPU work
+        val numLights = 0
+        val lightDistance = 5.0f
+        for (i in 0 until numLights) {
+            val alpha = i / numLights.toFloat()
+            val angle = (alpha * 2 * PI).toFloat()
+            val thisSpotLight = EntityManager.get().create()
+            val hsvColor = Color.HSVToColor(listOf(alpha * 360.0f, 1.0f, 1.0f).toFloatArray())
+            LightManager.Builder(LightManager.Type.POINT)
+                    .color(Color.red(hsvColor) / 255.0f, Color.green(hsvColor) / 255.0f, Color.blue(hsvColor) / 255.0f)
+                    .intensity(100_000.0f)
+                    //.position(0.0f * sin(angle), 0.0f * cos(angle), 3.0f)
+                    .position(lightDistance * sin(angle), 1.0f, lightDistance * cos(angle))
+                    .castShadows(true)
+                    .castLight(true)
+                    .build(engine, thisSpotLight)
+
+            scene.addEntity(thisSpotLight)
+            spotLights.add(thisSpotLight)
+        }
 
         // Set the exposure on the camera, this exposure follows the sunny f/16 rule
         // Since we've defined a light that has the same intensity as the sun, it
@@ -230,7 +286,7 @@ class MainActivity : Activity() {
         animator.repeatCount = ValueAnimator.INFINITE
         animator.addUpdateListener { a ->
             val v = (a.animatedValue as Float)
-            camera.lookAt(cos(v) * 4.5, 1.5, sin(v) * 4.5, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+            camera.lookAt(cos(v) * 14.5, 1.5, sin(v) * 14.5, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0)
         }
         animator.start()
     }
@@ -257,6 +313,10 @@ class MainActivity : Activity() {
         // Always detach the surface before destroying the engine
         uiHelper.detach()
 
+        // This ensures that all the commands we've sent to Filament have
+        // been processed before we attempt to destroy anything
+        engine.flushAndWait()
+
         // Cleanup all resources
         destroyMesh(engine, mesh)
         destroyIbl(engine, ibl)
@@ -281,6 +341,31 @@ class MainActivity : Activity() {
         engine.destroy()
     }
 
+    var severity = 0;
+
+    var framesRendered = 0
+    var lastSampleTimeMs = SystemClock.elapsedRealtime()
+    var secondsElapsed = 0
+
+    fun busyLoopFor(iterations: Long) {
+        Trace.beginSection("Busy Loop")
+        var dummy = 1.5
+        for (i in 0..iterations) {
+            if (dummy < 2.0) {
+                dummy *= 3.0
+            } else {
+                dummy /= 2.0
+            }
+            if (dummy == 1.2345) {
+                Log.v("Filament", "Hit the jackpot!");
+            }
+        }
+        Trace.endSection()
+    }
+
+    var secondsSinceLastScaleChange = 0
+    var currentScaleFactor = 0.85f
+
     inner class FrameCallback : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
             // Schedule the next frame
@@ -291,8 +376,41 @@ class MainActivity : Activity() {
                 // If beginFrame() returns false you should skip the frame
                 // This means you are sending frames too quickly to the GPU
                 if (renderer.beginFrame(swapChain!!)) {
+                    busyLoopFor(300000)
+
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - lastSampleTimeMs >= 1000) {
+                        // Log.i("Filament", "Rendering at $framesRendered fps")
+                        lastSampleTimeMs = now
+                        secondsElapsed += 1
+
+                        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+                        val powerManagerClass = PowerManager::class.java
+                        val getHeadroomForLoad = powerManagerClass.getMethod("getThermalHeadroom", Integer.TYPE)
+                        val headroom = getHeadroomForLoad(powerManager, 10) as Float
+
+                        if (secondsSinceLastScaleChange > 5) {
+                            if (headroom >= 0.99f) {
+                                currentScaleFactor -= 0.05f
+                                setScaleFactor(currentScaleFactor)
+                                secondsSinceLastScaleChange = 0
+                            } else if (headroom <= 0.98f && currentScaleFactor <= 0.85) {
+                                currentScaleFactor += 0.05f
+                                setScaleFactor(currentScaleFactor)
+                                secondsSinceLastScaleChange = 0
+                            }
+                        }
+
+                        Log.i("Filament", "$secondsElapsed $framesRendered $headroom $currentScaleFactor")
+
+                        framesRendered = 0
+                    }
+
                     renderer.render(view)
                     renderer.endFrame()
+                    framesRendered += 1
+
+                    busyLoopFor(400000)
                 }
             }
         }
@@ -317,7 +435,7 @@ class MainActivity : Activity() {
 
         override fun onResized(width: Int, height: Int) {
             val aspect = width.toDouble() / height.toDouble()
-            camera.setProjection(45.0, aspect, 0.1, 20.0, Camera.Fov.VERTICAL)
+            camera.setProjection(45.0, aspect, 0.1, 100.0, Camera.Fov.VERTICAL)
 
             view.viewport = Viewport(0, 0, width, height)
         }
